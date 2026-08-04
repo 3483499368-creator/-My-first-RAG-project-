@@ -216,3 +216,16 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+
+# IDE 配置
+.idea/
+
+# macOS 系统文件
+.DS_Store
+
+# 本地子仓库（你那个 backend 文件夹）
+#swxy(1)/swxy/backend/
+
+# （可选）如果你有其他 PDF 等大文件，建议也添加或将其移到项目外
+*.pdf
