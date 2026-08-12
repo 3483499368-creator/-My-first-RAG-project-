@@ -1,6 +1,10 @@
 import xxhash
 import datetime
+import os
+import re
+import pdfplumber
 from service.core.rag.app.naive import chunk
+from service.core.rag.nlp import rag_tokenizer, naive_merge, tokenize_chunks
 from service.core.rag.utils.es_conn import ESConnection
 from service.core.rag.nlp.model import generate_embedding
 from typing import List, Dict, Any
@@ -10,9 +14,53 @@ def dummy(prog=None, msg=""):
     pass
 
 def parse(file_path):
-    # 使用自定义的 PDF 解析器
+    # PDF 文件优先使用 PlainParser（纯文本提取），避免依赖 DeepDOC 的 OCR 模型
+    if re.search(r"\.pdf$", file_path, re.IGNORECASE):
+        try:
+            result = chunk(file_path, callback=dummy,
+                           parser_config={"chunk_token_num": 128, "delimiter": "\n!?。；！？", "layout_recognize": "Plain Text"})
+            if result:
+                return result
+        except Exception as e:
+            print(f"PDF PlainParser failed: {e}, falling back to pdfplumber")
+
+        # 降级方案：用 pdfplumber 直接提取文本并切分
+        return _parse_pdf_with_pdfplumber(file_path)
+
+    # 非 PDF 文件，使用默认 chunk()
     result = chunk(file_path, callback=dummy)
     return result
+
+def _parse_pdf_with_pdfplumber(file_path):
+    """pdfplumber 降级 PDF 解析：提取文本 → naive_merge 切 Chunk → tokenize"""
+    filename = os.path.basename(file_path)
+    sections = []
+
+    with pdfplumber.open(file_path) as pdf:
+        for page in pdf.pages:
+            text = page.extract_text()
+            if text:
+                for line in text.split('\n'):
+                    line = line.strip()
+                    if line:
+                        sections.append((line, ""))
+
+    if not sections:
+        print(f"No text extracted from PDF: {file_path}")
+        return []
+
+    # 构建文档元数据（与 naive.chunk 输出结构一致）
+    doc = {
+        "docnm_kwd": filename,
+        "title_tks": rag_tokenizer.tokenize(re.sub(r"\.[a-zA-Z]+$", "", filename))
+    }
+    doc["title_sm_tks"] = rag_tokenizer.fine_grained_tokenize(doc["title_tks"])
+
+    # 合并切分 + 分词，产出与 chunk() 相同结构的结果
+    chunks = naive_merge(sections, 128, "\n!?。；！？")
+    res = tokenize_chunks(chunks, doc, False, None)
+
+    return res
 
 def batch_generate_embeddings(texts: List[str], batch_size: int = 10) -> List[List[float]]:
     """
