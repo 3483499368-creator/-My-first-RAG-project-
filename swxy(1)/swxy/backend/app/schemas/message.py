@@ -1,30 +1,43 @@
-from pydantic import BaseModel, UUID4
-from typing import Optional
+from pydantic import BaseModel
 from datetime import datetime
-from typing import List, Union
+from typing import List, Optional
+
+
+# 同时兼容 Pydantic v1 和 v2
+try:
+    from pydantic import ConfigDict
+    _PYDANTIC_V2 = True
+except ImportError:
+    _PYDANTIC_V2 = False
 
 
 class MessageResponse(BaseModel):
-    message_id: UUID4
+    message_id: str
     session_id: str
     user_question: str
     model_answer: str
     created_at: datetime
-    documents: Optional[Union[list, dict]] = None
-    recommended_questions: Optional[Union[list, dict]] = None
-    think: Optional[str] 
+    documents: Optional[list] = None
+    recommended_questions: Optional[list] = None
+    think: Optional[str] = None
 
-    class Config:
-        orm_mode = True
+    if _PYDANTIC_V2:
+        model_config = ConfigDict(from_attributes=True)
+    else:
+        class Config:
+            orm_mode = True
 
-# 定义返回的文档模型
+
 class FilestResponse(BaseModel):
     user_id: str
     file_name: str
     created_at: str
     updated_at: str
+    number: int = 0
+    method: str = "General"
+    status: str = "success"
 
-# 单个会话的响应模型
+
 class SessionResponse(BaseModel):
     session_id: str
     session_name: str
@@ -32,7 +45,7 @@ class SessionResponse(BaseModel):
     created_at: str
     updated_at: str
 
-# 会话列表的响应模型
+
 class SessionListResponse(BaseModel):
     user_id: str
     sessions: List[SessionResponse]
