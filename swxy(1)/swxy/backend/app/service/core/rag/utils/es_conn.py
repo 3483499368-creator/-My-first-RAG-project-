@@ -88,21 +88,41 @@ class ESConnection():
         doc_id = xxhash.xxh64(file_name.encode("utf-8")).hexdigest()
 
         best_count = 0
-        # Query 1: docnm_kwd term（新代码写入的关键字段）
+        # Query 1: docnm_kwd（两种 mapping 兼容：直接 keyword 或 .keyword 子字段）
         try:
             res = self.es.count(
                 index=index_name,
-                body={"query": {"term": {"docnm_kwd": pure_name}}}
+                body={
+                    "query": {
+                        "bool": {
+                            "should": [
+                                {"term": {"docnm_kwd": pure_name}},
+                                {"term": {"docnm_kwd.keyword": pure_name}},
+                            ],
+                            "minimum_should_match": 1,
+                        }
+                    }
+                }
             )
             best_count = max(best_count, int(res.get("count", 0)))
         except Exception as e:
             logger.debug(f"count docnm_kwd={pure_name} failed: {e}")
 
-        # Query 2: file_name_kwd term（process_items 双写）
+        # Query 2: file_name_kwd（process_items 双写）
         try:
             res = self.es.count(
                 index=index_name,
-                body={"query": {"term": {"file_name_kwd": file_name}}}
+                body={
+                    "query": {
+                        "bool": {
+                            "should": [
+                                {"term": {"file_name_kwd": file_name}},
+                                {"term": {"file_name_kwd.keyword": file_name}},
+                            ],
+                            "minimum_should_match": 1,
+                        }
+                    }
+                }
             )
             best_count = max(best_count, int(res.get("count", 0)))
         except Exception as e:
@@ -112,11 +132,21 @@ class ESConnection():
         try:
             res = self.es.count(
                 index=index_name,
-                body={"query": {"term": {"doc_id_kwd": doc_id}}}
+                body={
+                    "query": {
+                        "bool": {
+                            "should": [
+                                {"term": {"doc_id_kwd": doc_id}},
+                                {"term": {"doc_id.keyword": doc_id}},
+                            ],
+                            "minimum_should_match": 1,
+                        }
+                    }
+                }
             )
             best_count = max(best_count, int(res.get("count", 0)))
         except Exception as e:
-            logger.debug(f"count doc_id_kwd={doc_id} failed: {e}")
+            logger.debug(f"count doc_id_kwd/doc_id.keyword={doc_id} failed: {e}")
 
         # Query 4: match docnm（兜底，兼容 docnm 字段写的是绝对路径的情况）
         if best_count == 0:
@@ -195,7 +225,40 @@ class ESConnection():
     """
     Database operations
     """
+    def ensure_index(self, index_name: str):
+        """确保索引存在且 mapping 正确。
+        - 不存在：用 mapping.json 里的 settings/mappings 创建
+        - 已存在但缺 dynamic_templates / analyzer（历史上自动推断创建过）：记录 warning，后续建议重索引修复
+        返回: (created_ok, needs_reindex: bool)
+        """
+        try:
+            if not self.es.indices.exists(index=index_name):
+                body = {
+                    "settings": self.mapping.get("settings", {}),
+                    "mappings": self.mapping.get("mappings", {}),
+                }
+                self.es.indices.create(index=index_name, body=body)
+                logger.info(f"[ensure_index] 新建索引 {index_name} 并应用 mapping.json")
+                return True, False
+
+            # 已存在：检查 dynamic_templates 是否生效
+            cur_mapping = self.es.indices.get_mapping(index=index_name)[index_name]["mappings"]
+            cur_templates = cur_mapping.get("dynamic_templates")
+            expect_templates = self.mapping.get("mappings", {}).get("dynamic_templates")
+            if expect_templates and (not cur_templates or len(cur_templates) != len(expect_templates)):
+                logger.warning(
+                    f"[ensure_index] 索引 {index_name} 已存在但 dynamic_templates 不匹配，"
+                    "建议删除该索引后重新上传文档，让新数据按 mapping.json 规范创建。"
+                )
+                return True, True
+            return True, False
+        except Exception as e:
+            logger.warning(f"[ensure_index] 索引 {index_name} 创建失败: {e}")
+            return False, False
+
     def insert(self, documents: list[dict], indexName: str, knowledgebaseId: str = None) -> list[str]:
+        # 插入前确保索引存在且已应用 mapping.json
+        self.ensure_index(indexName)
         # Refers to https://www.elastic.co/guide/en/elasticsearch/reference/current/docs-bulk.html
         operations = []
         for d in documents:
@@ -265,10 +328,27 @@ class ESConnection():
                 continue
             if not v:
                 continue
+            # 对于字符串字段（kb_id / docnm_kwd / file_name_kwd / doc_id 等），
+            # 同时兼容 dynamic_templates 生效（字段本身就是 keyword）和 ES 默认（text + 多字段 .keyword）两种 mapping
+            _FALLBACK_KEYWORD_FIELDS = {"kb_id", "docnm_kwd", "file_name_kwd", "doc_id", "docnm"}
             if isinstance(v, list):
-                bqry.filter.append(Q("terms", **{k: v}))
+                if k in _FALLBACK_KEYWORD_FIELDS:
+                    sub = Q("bool", should=[
+                        Q("terms", **{k: v}),
+                        Q("terms", **{f"{k}.keyword": v}),
+                    ], minimum_should_match=1)
+                    bqry.filter.append(sub)
+                else:
+                    bqry.filter.append(Q("terms", **{k: v}))
             elif isinstance(v, str) or isinstance(v, int):
-                bqry.filter.append(Q("term", **{k: v}))
+                if k in _FALLBACK_KEYWORD_FIELDS and isinstance(v, str):
+                    sub = Q("bool", should=[
+                        Q("term", **{k: v}),
+                        Q("term", **{f"{k}.keyword": v}),
+                    ], minimum_should_match=1)
+                    bqry.filter.append(sub)
+                else:
+                    bqry.filter.append(Q("term", **{k: v}))
             else:
                 raise Exception(
                     f"Condition `{str(k)}={str(v)}` value type is {str(type(v))}, expected to be int, str or list.")

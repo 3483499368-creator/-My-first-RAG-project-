@@ -232,9 +232,11 @@ def chunk(filename, binary=None, from_page=0, to_page=100000,
         return res
 
     elif re.search(r"\.pdf$", filename, re.IGNORECASE):
-        pdf_parser = Pdf()
+        # 懒加载：先判断 parser_config，再实例化对应解析器，避免 Plain Text 模式下也无谓地构造 DeepDOC Pdf()
         if parser_config.get("layout_recognize", "DeepDOC") == "Plain Text":
             pdf_parser = PlainParser()
+        else:
+            pdf_parser = Pdf()
         sections, tables = pdf_parser(filename if not binary else binary, from_page=from_page, to_page=to_page,
                                       callback=callback)
         res = tokenize_table(tables, doc, is_english)

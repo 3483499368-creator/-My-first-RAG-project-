@@ -89,14 +89,23 @@ def delete_document(user_id: str, file_name: str, db: Session) -> dict:
                 
             print(f"尝试使用 kb_id={kb_id_candidate} (类型: {type(kb_id_candidate)}) 删除文档")
             
-            # 尝试使用 match 查询而不是 term 查询
+            # 同时支持：kb_id 直接写 term + kb_id.keyword（ES默认text类型需带.keyword后缀）
+            # docnm 使用 match 查询也兼顾两种匹配逻辑，只要命中其中一条路径就能删除
             try:
                 delete_query = {
                     "query": {
                         "bool": {
                             "must": [
-                                {"match": {"docnm": file_name}},  # 使用 match 查询
-                                {"term": {"kb_id": kb_id_candidate}}
+                                {"match": {"docnm": file_name}},
+                                {
+                                    "bool": {
+                                        "should": [
+                                            {"term": {"kb_id": kb_id_candidate}},
+                                            {"term": {"kb_id.keyword": str(kb_id_candidate)}},
+                                        ],
+                                        "minimum_should_match": 1,
+                                    }
+                                }
                             ]
                         }
                     }
