@@ -28,38 +28,15 @@ else:
     exit(1)
 "
 
-# 检查并运行数据库迁移
-echo "检查数据库迁移状态..."
-python -c "
-import os
-from alembic.config import Config
-from alembic import command
-from alembic.script import ScriptDirectory
-from alembic.runtime.environment import EnvironmentContext
-from sqlalchemy import create_engine, text
+# 清理 Python 缓存（每次启动都清理，避免卷挂载导致的 .pyc 不同步问题）
+echo "清理 Python 缓存..."
+find /app -name '__pycache__' -exec rm -rf {} + 2>/dev/null
+find /app -name '*.pyc' -delete 2>/dev/null
+echo "缓存清理完成."
 
-try:
-    # 检查是否存在alembic_version表
-    engine = create_engine(os.environ['DATABASE_URL'])
-    alembic_cfg = Config('alembic.ini')
-    with engine.connect() as conn:
-        result = conn.execute(text(\"SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'alembic_version')\"))
-        table_exists = result.scalar()
-        
-        if not table_exists:
-            print('首次部署，标记baseline...')
-            command.stamp(alembic_cfg, '980b32f130df')
-            print('Baseline标记完成')
-        
-    print('运行数据库迁移...')
-    command.upgrade(alembic_cfg, 'head')
-    print('数据库迁移完成!')
-        
-except Exception as e:
-    print(f'迁移过程出错: {e}')
-    # 不退出，继续启动应用（向下兼容）
-    print('警告: 迁移失败，但应用将继续启动')
-"
+# 检查并运行数据库迁移（调用独立的 Python 脚本，避免 bash 内嵌 python 换行符问题）
+echo "检查数据库迁移状态..."
+python run_migration.py
 
 echo "启动应用服务..."
-exec "$@" 
+exec "$@"
