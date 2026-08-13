@@ -1,9 +1,4 @@
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-from router import chat_rt
-from router import user_rt
-from router import history_rt
-# ============= 强制使用本地 NLTK 数据 =============
+# ============= 强制使用本地 NLTK 数据（必须在 router 导入之前）=============
 import os
 import nltk
 
@@ -27,6 +22,12 @@ except LookupError as e:
 except Exception as e:
     print(f"❌ wordnet 加载失败: {e}")
 # ==================================================
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from router import chat_rt
+from router import user_rt
+from router import history_rt
 
 # 从环境变量获取 root_path
 root_path = os.getenv("ROOT_PATH", "http://localhost:8000")
