@@ -1,18 +1,99 @@
 import xxhash
 import datetime
+import os
+import re
+import logging
 from service.core.rag.app.naive import chunk
 from service.core.rag.utils.es_conn import ESConnection
 from service.core.rag.nlp.model import generate_embedding
+from service.core.rag.nlp import naive_merge, tokenize_chunks
 from typing import List, Dict, Any
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 def dummy(prog=None, msg=""):
     pass
 
+
+def _parse_pdf_with_pdfplumber(file_path: str):
+    """降级方案：pdfplumber 逐页提取文本 → naive_merge → tokenize_chunks。
+    与 chunk() 返回结构一致：list[dict]，包含 docnm_kwd / title_tks / content_with_weight 等。
+    """
+    try:
+        import pdfplumber
+        from service.core.rag.nlp import rag_tokenizer
+    except Exception as e:
+        raise RuntimeError(f"pdfplumber 或 rag_tokenizer 不可用: {e}")
+
+    # 1. 提取纯文本
+    buffer = []
+    with pdfplumber.open(file_path) as pdf:
+        for page in pdf.pages:
+            t = page.extract_text() or ""
+            if t.strip():
+                buffer.append(t)
+    full_text = "\n".join(buffer)
+    if not full_text.strip():
+        return []
+
+    # 2. 元数据
+    pure_name = os.path.basename(file_path)
+    doc = {
+        "docnm_kwd": pure_name,
+        "title_tks": rag_tokenizer.tokenize(re.sub(r"\.[a-zA-Z]+$", "", pure_name)),
+    }
+    doc["title_sm_tks"] = rag_tokenizer.fine_grained_tokenize(doc["title_tks"])
+
+    # 3. 按行切 sections，结构同 naive.py: list[(text, "")]
+    lines = [ln.strip() for ln in full_text.split("\n") if ln.strip()]
+    sections = [(ln, "") for ln in lines]
+
+    # 4. 合并成 chunk（128 token 窗口，默认分隔符），再 tokenize 出 content_ltks/content_sm_ltks
+    chunks = naive_merge(sections, 128, "\n!?。；！？")
+    tokenized = tokenize_chunks(chunks, doc, False, None)
+    return tokenized
+
+
 def parse(file_path):
-    # 使用自定义的 PDF 解析器
-    result = chunk(file_path, callback=dummy)
-    return result
+    """解析文件 → 返回 Chunk 列表。
+    PDF 采用三级降级：PlainParser → pdfplumber → DeepDOC Pdf()。
+    其他格式走 RAGFlow 原始 chunk() 逻辑。
+    """
+    filename_lower = str(file_path).lower()
+
+    # 对 PDF 走定制降级逻辑，避免默认 DeepDOC 需要的 OCR/布局模型缺失直接炸
+    if filename_lower.endswith(".pdf"):
+        pure_name = os.path.basename(file_path)
+        # Level 1: PlainParser
+        try:
+            from service.core.deepdoc.parser.pdf_parser import PlainParser
+            logger.info(f"[PDF L1 PlainParser] 解析: {pure_name}")
+            return chunk(
+                file_path,
+                callback=dummy,
+                parser_config={
+                    "chunk_token_num": 128,
+                    "delimiter": "\n!?。；！？",
+                    "layout_recognize": "Plain Text",
+                },
+            )
+        except Exception as e1:
+            logger.warning(f"[PDF L1 PlainParser] 失败: {e1}")
+
+        # Level 2: pdfplumber 直接提取文本
+        try:
+            logger.info(f"[PDF L2 pdfplumber] 解析: {pure_name}")
+            return _parse_pdf_with_pdfplumber(file_path)
+        except Exception as e2:
+            logger.warning(f"[PDF L2 pdfplumber] 失败: {e2}")
+
+        # Level 3: DeepDOC（最后的选择，需要下载模型）
+        logger.info(f"[PDF L3 DeepDOC] 回退尝试: {pure_name}")
+        return chunk(file_path, callback=dummy)
+
+    # 其他文件直接走默认逻辑
+    return chunk(file_path, callback=dummy)
 
 def batch_generate_embeddings(texts: List[str], batch_size: int = 10) -> List[List[float]]:
     """
@@ -72,9 +153,15 @@ def process_items(items: List[Dict[str, Any]], file_name: str, index_name: str) 
             }
 
             d["kb_id"] = index_name
-            d["docnm_kwd"] = item["docnm_kwd"]
+            # docnm_kwd 归一化：只保留 basename，避免绝对路径导致后续 term 查询匹配不到
+            raw_docnm_kwd = item.get("docnm_kwd") or file_name
+            normalized_kwd = os.path.basename(raw_docnm_kwd)
+            d["docnm_kwd"] = normalized_kwd
+            # 兼容旧数据，再额外写一份 file_name 作为 keyword 字段
+            d["file_name_kwd"] = file_name
             d["title_tks"] = item["title_tks"]
             d["doc_id"] = xxhash.xxh64(file_name.encode("utf-8")).hexdigest()
+            # docnm 字段也统一只写纯文件名
             d["docnm"] = file_name
             
             # 将嵌入向量存储到字典中

@@ -67,7 +67,69 @@ class ESConnection():
 
     def getChunkIds(self, res):
         return [d["_id"] for d in res["hits"]["hits"]]
-    
+
+    def count_docs_by_docnm(self, index_name: str, file_name: str) -> int:
+        """按文件名统计某个文件写入了多少 Chunk。
+        兼容三种情况（取最大值）：
+        1) docnm_kwd = 纯文件名（新代码规范写法）
+        2) file_name_kwd = 纯文件名（process_items 双写字段）
+        3) docnm match 查询（兼容旧 docnm=绝对路径 的数据）
+        """
+        import xxhash
+        # 先判断索引是否存在，不存在直接返回 0
+        try:
+            if not self.es.indices.exists(index=index_name):
+                return 0
+        except Exception as e:
+            logger.warning(f"count_docs_by_docnm 检查索引 {index_name} 失败: {e}")
+            return 0
+
+        pure_name = os.path.basename(file_name)
+        doc_id = xxhash.xxh64(file_name.encode("utf-8")).hexdigest()
+
+        best_count = 0
+        # Query 1: docnm_kwd term（新代码写入的关键字段）
+        try:
+            res = self.es.count(
+                index=index_name,
+                body={"query": {"term": {"docnm_kwd": pure_name}}}
+            )
+            best_count = max(best_count, int(res.get("count", 0)))
+        except Exception as e:
+            logger.debug(f"count docnm_kwd={pure_name} failed: {e}")
+
+        # Query 2: file_name_kwd term（process_items 双写）
+        try:
+            res = self.es.count(
+                index=index_name,
+                body={"query": {"term": {"file_name_kwd": file_name}}}
+            )
+            best_count = max(best_count, int(res.get("count", 0)))
+        except Exception as e:
+            logger.debug(f"count file_name_kwd={file_name} failed: {e}")
+
+        # Query 3: doc_id term（process_items 里按 file_name 算的 xxhash）
+        try:
+            res = self.es.count(
+                index=index_name,
+                body={"query": {"term": {"doc_id_kwd": doc_id}}}
+            )
+            best_count = max(best_count, int(res.get("count", 0)))
+        except Exception as e:
+            logger.debug(f"count doc_id_kwd={doc_id} failed: {e}")
+
+        # Query 4: match docnm（兜底，兼容 docnm 字段写的是绝对路径的情况）
+        if best_count == 0:
+            try:
+                res = self.es.count(
+                    index=index_name,
+                    body={"query": {"match": {"docnm": pure_name}}}
+                )
+                best_count = max(best_count, int(res.get("count", 0)))
+            except Exception as e:
+                logger.debug(f"count match docnm={pure_name} failed: {e}")
+
+        return best_count
 
     def getHighlight(self, res, keywords: list[str], fieldnm: str):
         ans = {}
