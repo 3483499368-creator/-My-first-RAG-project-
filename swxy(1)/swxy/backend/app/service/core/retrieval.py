@@ -3,15 +3,24 @@ from service.core.rag.nlp.search_v2 import Dealer
 from service.core.rag.utils.es_conn import ESConnection
 
 import json
-# 创建 ElasticsearchConnection 实例
-es_connection = ESConnection()
 
-# 创建 Dealer 实例
-dealer = Dealer(dataStore=es_connection)
+# 懒加载：避免在模块导入时就连接 ES
+_es_connection = None
+_dealer = None
+
+def _get_dealer():
+    global _es_connection, _dealer
+    if _dealer is None:
+        _es_connection = ESConnection()
+        _dealer = Dealer(dataStore=_es_connection)
+    return _dealer
 
 
 def retrieve_content(indexNames: str, question: str):
 
+    # 懒加载获取 dealer
+    dealer = _get_dealer()
+    
     # 执行搜索
     results = dealer.retrieval(question = question,
                                embd_mdl = None,

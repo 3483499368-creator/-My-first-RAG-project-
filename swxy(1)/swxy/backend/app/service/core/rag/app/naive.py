@@ -232,7 +232,7 @@ def chunk(filename, binary=None, from_page=0, to_page=100000,
         return res
 
     elif re.search(r"\.pdf$", filename, re.IGNORECASE):
-        # 懒加载：先判断 parser_config，再实例化对应解析器，避免 Plain Text 模式下也无谓地构造 DeepDOC Pdf()
+        # 懒加载：Plain Text 模式直接用 PlainParser，避免无谓地构造 DeepDOC Pdf()
         if parser_config.get("layout_recognize", "DeepDOC") == "Plain Text":
             pdf_parser = PlainParser()
         else:

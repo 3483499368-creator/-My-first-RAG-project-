@@ -446,20 +446,23 @@ def get_chat_completion(session_id, question, retrieved_content, user_id):
             else:
                 # 实时输出消息
                 delta = chunk.choices[0].delta
-                if delta.content:
-                    model_answer += delta.content  # 累加大模型的回答
+                content = delta.content or ""
+                reasoning = getattr(delta, 'reasoning_content', None) or ""
+                
+                if content:
+                    model_answer += content  # 累加大模型的回答
                     message = {
                         "role": "assistant",
-                        "content": delta.content,
+                        "content": content,
                         "thinking": False,
                     }
                     json_message = json.dumps(message)
                     yield f"event: message\ndata: {json_message}\n\n"
-                else:
-                    think += delta.reasoning_content
+                elif reasoning:
+                    think += reasoning
                     message = {
                         "role": "assistant",
-                        "content": delta.reasoning_content,
+                        "content": reasoning,
                         "thinking": True,
                     }
                     json_message = json.dumps(message)
