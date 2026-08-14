@@ -3,6 +3,9 @@ from service.core.rag.nlp.search_v2 import Dealer
 from service.core.rag.utils.es_conn import ESConnection
 
 import json
+import logging
+
+logger = logging.getLogger(__name__)
 
 # 懒加载：避免在模块导入时就连接 ES
 _es_connection = None
@@ -20,7 +23,9 @@ def retrieve_content(indexNames: str, question: str):
 
     # 懒加载获取 dealer
     dealer = _get_dealer()
-    
+
+    logger.info(f"[retrieve_content] 开始检索: index={indexNames}, question={question[:50]}")
+
     # 执行搜索
     results = dealer.retrieval(question = question,
                                embd_mdl = None,
@@ -31,18 +36,20 @@ def retrieve_content(indexNames: str, question: str):
                                page_size = 5
     )
 
+    logger.info(f"[retrieve_content] 检索结果: total={results.get('total', 0)}, chunks={len(results.get('chunks', []))}")
+
     # 提取 chunks 中的信息
     extracted_data = []
 
 
     for i, chunk in enumerate(results['chunks'], start=1):
         content_with_weight = chunk.get('content_with_weight', 'N/A')
-        # similarity = chunk.get('similarity', 'N/A')
-        # vector_similarity = chunk.get('vector_similarity', 'N/A')
-        # term_similarity = chunk.get('term_similarity', 'N/A')
+        similarity = chunk.get('similarity', 'N/A')
         doc_id = chunk.get('doc_id', 'N/A')
         docnm = chunk.get('docnm_kwd', 'N/A')
         docnm = docnm.split("/")[-1]
+
+        logger.info(f"[retrieve_content] chunk {i}: sim={similarity}, doc={docnm}, content={content_with_weight[:80]}")
 
         message = {
             "id": i,
@@ -50,7 +57,7 @@ def retrieve_content(indexNames: str, question: str):
             "document_name": docnm,
             'content_with_weight': content_with_weight,
         }
-        
+
         extracted_data.append(message)
 
     return extracted_data

@@ -400,6 +400,7 @@ class Dealer:
         sres = self.search(req, [index_name(tid) for tid in tenant_ids],
                            kb_ids, embd_mdl, highlight, rank_feature=rank_feature)
         ranks["total"] = sres.total
+        logging.info(f"[retrieval] search total={sres.total}, ids_count={len(sres.ids)}, query_vector_len={len(sres.query_vector) if sres.query_vector else 0}")
 
 
         if page <= RERANK_PAGE_LIMIT:
@@ -424,11 +425,14 @@ class Dealer:
             sim = tsim = vsim = [1] * len(sres.ids)
             idx = list(range(len(sres.ids)))
 
+        logging.info(f"[retrieval] rerank done, idx_count={len(idx)}, sim_range=[{min(sim) if len(sim) > 0 else 'N/A':.4f} ~ {max(sim) if len(sim) > 0 else 'N/A':.4f}], similarity_threshold={similarity_threshold}")
+
         dim = len(sres.query_vector) if sres.query_vector else 0
         vector_column = f"q_{dim}_vec" if dim > 0 else None
         zero_vector = [0.0] * dim if dim > 0 else []
         for i in idx:
             if sim[i] < similarity_threshold:
+                logging.info(f"[retrieval] chunk {i} sim={sim[i]:.4f} < threshold={similarity_threshold}, stop")
                 break
             if len(ranks["chunks"]) >= page_size:
                 if aggs:
