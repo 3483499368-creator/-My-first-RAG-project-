@@ -44,14 +44,21 @@ class Dealer:
         group_docs: list[list] | None = None
 
     def get_vector(self, txt, emb_mdl, topk=10, similarity=0.1):
-        qv = generate_embedding(txt)
-        shape = np.array(qv).shape
-        if len(shape) > 1:
-            raise Exception(
-                f"Dealer.get_vector returned array's shape {shape} doesn't match expectation(exact one dimension).")
-        embedding_data = [float(v) for v in qv]
-        vector_column_name = f"q_{len(embedding_data)}_vec"
-        return MatchDenseExpr(vector_column_name, embedding_data, 'float', 'cosine', topk, {"similarity": similarity})
+        try:
+            qv = generate_embedding(txt)
+            if qv is None:
+                logging.warning("generate_embedding returned None for query: %s", txt[:50])
+                return None
+            shape = np.array(qv).shape
+            if len(shape) > 1:
+                raise Exception(
+                    f"Dealer.get_vector returned array's shape {shape} doesn't match expectation(exact one dimension).")
+            embedding_data = [float(v) for v in qv]
+            vector_column_name = f"q_{len(embedding_data)}_vec"
+            return MatchDenseExpr(vector_column_name, embedding_data, 'float', 'cosine', topk, {"similarity": similarity})
+        except Exception as e:
+            logging.error(f"get_vector failed: {e}")
+            return None
 
     def get_filters(self, req):
         condition = dict()
@@ -98,14 +105,32 @@ class Dealer:
         else:
             highlightFields = ["content_ltks", "title_tks"] if highlight else []
             matchText, keywords = self.qryr.question(qst, min_match=0.3)
-            # if emb_mdl is None:
-            #     matchExprs = [matchText]
-            #     res = self.dataStore.search(src, highlightFields, filters, matchExprs, orderBy, offset, limit,
-            #                                 idx_names, kb_ids, rank_feature=rank_feature)
-            #     total = self.dataStore.getTotal(res)
-            #     logging.debug("Dealer.search TOTAL: {}".format(total))
-            # else:
-            matchDense = self.get_vector(qst, emb_mdl, topk, req.get("similarity", 0.1))
+            if matchText is None:
+                logging.warning("matchText is None with min_match=0.3, retrying with min_match=0.0")
+                matchText, keywords = self.qryr.question(qst, min_match=0.0)
+            if matchText is None:
+                logging.warning("matchText is still None, using raw question text")
+                from service.core.rag.utils.doc_store_conn import MatchTextExpr
+                matchText = MatchTextExpr(self.qryr.query_fields, qst, 100, {"minimum_should_match": 0.0})
+
+            matchDense = self.get_vector(qst, embd_mdl, topk, req.get("similarity", 0.1))
+            if matchDense is None or matchDense.embedding_data is None:
+                logging.warning("Embedding generation failed, falling back to text-only search")
+                res = self.dataStore.search(src, highlightFields, filters, [matchText], orderBy, offset, limit,
+                                            idx_names, kb_ids, rank_feature=rank_feature)
+                total = self.dataStore.getTotal(res)
+                logging.debug("Dealer.search (text-only) TOTAL: {}".format(total))
+                sres = self.SearchResult(
+                    total=total,
+                    ids=self.dataStore.getChunkIds(res),
+                    query_vector=[],
+                    field=self.dataStore.getFields(res, src),
+                    highlight=self.dataStore.getHighlight(res, keywords, "content_with_weight"),
+                    aggregation=self.dataStore.getAggregation(res, "docnm_kwd"),
+                    keywords=keywords
+                )
+                return sres
+
             q_vec = matchDense.embedding_data
             src.append(f"q_{len(q_vec)}_vec")
             fusionExpr = FusionExpr("weighted_sum", topk, {"weights": "0.05, 0.95"})
@@ -117,6 +142,10 @@ class Dealer:
             # If result is empty, try again with lower min_match
             if total == 0:
                 matchText, _ = self.qryr.question(qst, min_match=0.1)
+                if matchText is None:
+                    matchText, _ = self.qryr.question(qst, min_match=0.0)
+                if matchText is None:
+                    matchText = MatchTextExpr(self.qryr.query_fields, qst, 100, {"minimum_should_match": 0.0})
                 filters.pop("doc_ids", None)
                 matchDense.extra_options["similarity"] = 0.17
                 res = self.dataStore.search(src, highlightFields, filters, [matchText, matchDense, fusionExpr],
@@ -278,14 +307,17 @@ class Dealer:
                ):
         _, keywords = self.qryr.question(query)
         vector_size = len(sres.query_vector)
-        vector_column = f"q_{vector_size}_vec"
-        zero_vector = [0.0] * vector_size
+        vector_column = f"q_{vector_size}_vec" if vector_size > 0 else None
+        zero_vector = [0.0] * vector_size if vector_size > 0 else []
         ins_embd = []
         for chunk_id in sres.ids:
-            vector = sres.field[chunk_id].get(vector_column, zero_vector)
-            if isinstance(vector, str):
-                vector = [float(v) for v in vector.split("\t")]
-            ins_embd.append(vector)
+            if vector_column:
+                vector = sres.field[chunk_id].get(vector_column, zero_vector)
+                if isinstance(vector, str):
+                    vector = [float(v) for v in vector.split("\t")]
+                ins_embd.append(vector)
+            else:
+                ins_embd.append(zero_vector)
         if not ins_embd:
             return [], [], []
 
@@ -304,10 +336,16 @@ class Dealer:
         ## For rank feature(tag_fea) scores.
         rank_fea = self._rank_feature_scores(rank_feature, sres)
 
-        sim, tksim, vtsim = self.qryr.hybrid_similarity(sres.query_vector,
-                                                        ins_embd,
-                                                        keywords,
-                                                        ins_tw, tkweight, vtweight)
+        if vector_size > 0:
+            sim, tksim, vtsim = self.qryr.hybrid_similarity(sres.query_vector,
+                                                            ins_embd,
+                                                            keywords,
+                                                            ins_tw, tkweight, vtweight)
+        else:
+            sim = self.qryr.token_similarity(keywords, ins_tw)
+            sim = np.array(sim) + rank_fea
+            tksim = sim
+            vtsim = [0.0] * len(sres.ids)
 
         return sim + rank_fea, tksim, vtsim
 
@@ -366,11 +404,17 @@ class Dealer:
 
         if page <= RERANK_PAGE_LIMIT:
             if sres.total > 0:
-                print("重排模型。。。。")
-                sim, tsim, vsim = self.rerank_by_model(rerank_mdl,
-                                                       sres, question, 1 - vector_similarity_weight,
-                                                       vector_similarity_weight,
-                                                       rank_feature=rank_feature)
+                try:
+                    logging.info("使用重排模型...")
+                    sim, tsim, vsim = self.rerank_by_model(rerank_mdl,
+                                                           sres, question, 1 - vector_similarity_weight,
+                                                           vector_similarity_weight,
+                                                           rank_feature=rank_feature)
+                except Exception as e:
+                    logging.warning(f"rerank_by_model failed: {e}, falling back to rerank")
+                    sim, tsim, vsim = self.rerank(
+                        sres, question, 1 - vector_similarity_weight, vector_similarity_weight,
+                        rank_feature=rank_feature)
             else:
                 sim, tsim, vsim = self.rerank(
                     sres, question, 1 - vector_similarity_weight, vector_similarity_weight,
@@ -380,9 +424,9 @@ class Dealer:
             sim = tsim = vsim = [1] * len(sres.ids)
             idx = list(range(len(sres.ids)))
 
-        dim = len(sres.query_vector)
-        vector_column = f"q_{dim}_vec"
-        zero_vector = [0.0] * dim
+        dim = len(sres.query_vector) if sres.query_vector else 0
+        vector_column = f"q_{dim}_vec" if dim > 0 else None
+        zero_vector = [0.0] * dim if dim > 0 else []
         for i in idx:
             if sim[i] < similarity_threshold:
                 break
@@ -395,6 +439,9 @@ class Dealer:
             dnm = chunk.get("docnm_kwd", "")
             did = chunk.get("doc_id", "")
             position_int = chunk.get("position_int", [])
+            vector_val = chunk.get(vector_column, zero_vector) if vector_column else zero_vector
+            if isinstance(vector_val, str):
+                vector_val = [float(v) for v in vector_val.split("\t")]
             d = {
                 "chunk_id": id,
                 "content_ltks": chunk["content_ltks"],
@@ -405,9 +452,9 @@ class Dealer:
                 "important_kwd": chunk.get("important_kwd", []),
                 "image_id": chunk.get("img_id", ""),
                 "similarity": sim[i],
-                "vector_similarity": vsim[i],
-                "term_similarity": tsim[i],
-                "vector": chunk.get(vector_column, zero_vector),
+                "vector_similarity": vsim[i] if isinstance(vsim, list) and i < len(vsim) else 0.0,
+                "term_similarity": tsim[i] if isinstance(tsim, list) and i < len(tsim) else 0.0,
+                "vector": vector_val,
                 "positions": position_int,
             }
             if highlight and sres.highlight:

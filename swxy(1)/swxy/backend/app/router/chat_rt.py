@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Body, UploadFile, File, HTTPException, Query, Security, status, Depends
 import uuid
+import traceback
 from schemas.chat import SessionResponse, ChatRequest
 from fastapi.responses import StreamingResponse
 import os
@@ -170,17 +171,29 @@ async def chat_on_docs(
         
         logger.info(f"开始处理用户 {user_id} 的请求")
         logger.info(f"问题内容: {request.message}")
+        logger.info(f"session_id: {session_id}")
         
         question = request.message
         
         # 尝试从知识库检索内容，如果没有知识库也不报错
+        # 使用 user_id 作为索引名（与上传时保持一致）
         references = []
         try:
-            logger.info("开始检索相关内容...")
+            logger.info(f"开始检索相关内容，索引名={user_id}...")
             references = retrieve_content(user_id, question)
-            logger.info(f"检索到 {len(references)} 条相关内容")
+            logger.info(f"使用 user_id 检索到 {len(references)} 条相关内容")
+            
+            # 兼容：如果 user_id 索引没有结果，尝试用 session_id 索引（旧版兼容）
+            if not references and session_id != user_id:
+                logger.info(f"user_id 索引无结果，尝试使用 session_id={session_id} 检索...")
+                references = retrieve_content(session_id, question)
+                logger.info(f"使用 session_id 检索到 {len(references)} 条相关内容")
+            
+            if references:
+                logger.info(f"第一条引用: doc={references[0].get('document_name', 'N/A')}, content={references[0].get('content_with_weight', '')[:100]}")
         except Exception as e:
-            logger.info(f"用户 {user_id} 没有知识库或检索失败: {str(e)}，将不使用知识库内容")
+            logger.error(f"用户 {user_id} 检索失败: {str(e)}")
+            logger.error(traceback.format_exc())
             references = []
 
         logger.info("开始生成回答...")
@@ -290,9 +303,10 @@ async def upload_files(
                 file_url = f"{storage_dir}/{session_id}/{file_name}"
                 logger.info(f"Processing file: {file_url}")
 
-                # 尝试解析和插入文档
+                # 尝试解析和插入文档（使用 user_id 作为 ES 索引名，保持一致性）
                 try:
-                    execute_insert_process(file_url, file_name, session_id)
+                    es_index_name = user_id
+                    execute_insert_process(file_url, file_name, es_index_name)
                     logger.info(f"数据插入es成功: {file_name}")
                     
                     insert_knowledgebase(user_id, file_name)

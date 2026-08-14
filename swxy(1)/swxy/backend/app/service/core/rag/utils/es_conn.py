@@ -357,11 +357,11 @@ class ESConnection():
         vector_similarity_weight = 0.5
         for m in matchExprs:
             if isinstance(m, FusionExpr) and m.method == "weighted_sum" and "weights" in m.fusion_params:
-                assert len(matchExprs) == 3 and isinstance(matchExprs[0], MatchTextExpr) and isinstance(matchExprs[1],
-                                                                                                        MatchDenseExpr) and isinstance(
-                    matchExprs[2], FusionExpr)
-                weights = m.fusion_params["weights"]
-                vector_similarity_weight = float(weights.split(",")[1])
+                if len(matchExprs) == 3 and isinstance(matchExprs[0], MatchTextExpr) and isinstance(matchExprs[1], MatchDenseExpr):
+                    weights = m.fusion_params["weights"]
+                    vector_similarity_weight = float(weights.split(",")[1])
+                else:
+                    logger.warning(f"FusionExpr assertion skipped: matchExprs types mismatch, len={len(matchExprs)}")
         for m in matchExprs:
             if isinstance(m, MatchTextExpr):
                 minimum_should_match = m.extra_options.get("minimum_should_match", 0.0)
