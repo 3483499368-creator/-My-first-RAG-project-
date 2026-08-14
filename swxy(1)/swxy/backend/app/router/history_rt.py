@@ -12,6 +12,21 @@ from service.document_operations import delete_document
 
 router = APIRouter()
 
+
+def _get_chunk_number(user_id: str, file_name: str) -> int:
+    """从 ES 统计某个文件的切片数；失败时返回 0，避免影响文档列表展示。"""
+    try:
+        from service.core.rag.utils.es_conn import ESConnection
+        es = ESConnection()
+        return es.count_docs_by_docnm(user_id, file_name)
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning(
+            f"_get_chunk_number user={user_id} file={file_name} 失败: {e}"
+        )
+        return 0
+
+
 ############################
 #   获取文档列表
 ############################
@@ -32,7 +47,7 @@ async def get_documents_by_user_id(
 
         # 构建查询语句
         stmt = select(KnowledgeBase).where(KnowledgeBase.user_id == user_id)
-        
+
         # 执行查询
         result = db.execute(stmt).scalars().all()
 
@@ -40,16 +55,20 @@ async def get_documents_by_user_id(
         if not result:
             return []
 
-        # 将查询结果转换为 Pydantic 模型
-        documents = [
-            FilestResponse(
-                user_id=row.user_id,
-                file_name=row.file_name,
-                created_at=row.created_at.isoformat(),
-                updated_at=row.updated_at.isoformat()
+        # 将查询结果转换为 Pydantic 模型，并补齐切片数量
+        documents = []
+        for row in result:
+            documents.append(
+                FilestResponse(
+                    user_id=row.user_id,
+                    file_name=row.file_name,
+                    created_at=row.created_at.isoformat(),
+                    updated_at=row.updated_at.isoformat(),
+                    number=_get_chunk_number(user_id, row.file_name),
+                    method="General",
+                    status="已完成",
+                )
             )
-            for row in result
-        ]
 
         return documents
 
